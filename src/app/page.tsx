@@ -3,6 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentPanel } from "./agent-panel";
 
 type Row = Record<string, string | number | null>;
 type ShopData = { orders: Row[]; tickets: Row[]; products: Row[] };
@@ -44,6 +45,8 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
   const [input, setInput] = useState("");
   const [data, setData] = useState<ShopData | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [tab, setTab] = useState<"trace" | "db">("trace");
+  const [liveMs, setLiveMs] = useState(0);
 
   const transport = useMemo(
     () =>
@@ -78,7 +81,8 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
   });
 
   useEffect(() => {
-    void refreshData();
+    const id = setTimeout(() => void refreshData(), 0);
+    return () => clearTimeout(id);
   }, [refreshData]);
 
   useEffect(() => {
@@ -86,6 +90,14 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
   }, [messages, status]);
 
   const busy = status === "submitted" || status === "streaming";
+
+  // Ажиллаж байх үед цагийн шугамыг 100 мс тутамд шинэчилнэ.
+  useEffect(() => {
+    if (!busy) return;
+    const start = Date.now();
+    const id = setInterval(() => setLiveMs(Date.now() - start), 100);
+    return () => clearInterval(id);
+  }, [busy]);
 
   const send = (text: string) => {
     const t = text.trim();
@@ -208,15 +220,32 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
         </form>
       </main>
 
-      {/* DB самбар */}
-      <aside className="hidden w-96 shrink-0 flex-col overflow-y-auto border-l border-zinc-200 bg-white lg:flex">
-        <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
-          <h2 className="text-sm font-semibold">Өгөгдлийн сан (шууд төлөв)</h2>
-          <button onClick={resetDb} className="text-xs text-zinc-500 underline hover:text-zinc-900">
-            Анхны төлөвт буцаах
-          </button>
+      {/* Баруун тал: агентын ажиллагаа / өгөгдлийн сан */}
+      <aside className="hidden w-[28rem] shrink-0 flex-col overflow-y-auto border-l border-zinc-200 bg-white md:flex">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-200 bg-white px-4 py-2.5">
+          <div className="flex gap-1 rounded-lg bg-zinc-100 p-1 text-sm">
+            <button
+              onClick={() => setTab("trace")}
+              className={`rounded-md px-3 py-1 ${tab === "trace" ? "bg-white font-medium shadow-sm" : "text-zinc-500"}`}
+            >
+              Агентын ажиллагаа
+            </button>
+            <button
+              onClick={() => setTab("db")}
+              className={`rounded-md px-3 py-1 ${tab === "db" ? "bg-white font-medium shadow-sm" : "text-zinc-500"}`}
+            >
+              Өгөгдлийн сан
+            </button>
+          </div>
+          {tab === "db" && (
+            <button onClick={resetDb} className="text-xs text-zinc-500 underline hover:text-zinc-900">
+              Анхны төлөвт буцаах
+            </button>
+          )}
         </div>
-        {!data ? (
+        {tab === "trace" ? (
+          <AgentPanel messages={messages} busy={busy} liveMs={liveMs} />
+        ) : !data ? (
           <p className="p-4 text-sm text-zinc-400">Ачаалж байна…</p>
         ) : (
           <div className="flex flex-col gap-5 p-4 text-xs">
