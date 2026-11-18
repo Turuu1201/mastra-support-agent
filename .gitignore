@@ -43,3 +43,6 @@ next-env.d.ts
 # local databases
 /data/
 !.env.example
+
+.vercel
+.env*
