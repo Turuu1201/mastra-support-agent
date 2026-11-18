@@ -1,6 +1,7 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { getDb } from "@/lib/db";
+import { searchKnowledgeBase } from "@/lib/knowledge";
 
 const STATUS_MN: Record<string, string> = {
   pending: "хүлээгдэж буй",
@@ -102,7 +103,10 @@ export const listCustomerOrders = createTool({
 export const cancelOrder = createTool({
   id: "cancel-order",
   description:
-    "Захиалгыг цуцална. Зөвхөн pending эсвэл processing төлөвтэй захиалга цуцлагдана. Хэрэглэгч тодорхой зөвшөөрсний дараа л дуудна.",
+    "Захиалгыг цуцална. Зөвхөн pending эсвэл processing төлөвтэй захиалга цуцлагдана. Дуудахад хэрэглэгчийн дэлгэц дээр Зөвшөөрөх/Татгалзах товч гарч, зөвшөөрсний дараа л биелнэ.",
+  // Human-in-the-loop: загвар энэ tool-ийг дуудахад Mastra ажиллагааг түр зогсоож,
+  // хүн зөвшөөрөх хүртэл execute-ийг ажиллуулахгүй.
+  requireApproval: true,
   inputSchema: z.object({
     orderId: z.string().describe("Цуцлах захиалгын дугаар"),
     reason: z.string().describe("Цуцлах шалтгаан"),
@@ -164,21 +168,18 @@ export const createTicket = createTool({
   },
 });
 
-export const getStorePolicy = createTool({
-  id: "get-store-policy",
+export const searchKnowledge = createTool({
+  id: "search-knowledge",
   description:
-    "Дэлгүүрийн журам, мэдээллийг авна: хүргэлт, буцаалт, баталгаа, төлбөр, захиалга цуцлах, цагийн хуваарь. Журмын талаарх асуултад таамаглалгүйгээр заавал энэ tool-ийг ашигла.",
+    "Дэлгүүрийн мэдлэгийн сангаас утгаар нь хайна (RAG). Хамрах сэдэв: хүргэлт, буцаалт, солилт, баталгаат засвар, төлбөр, хуваан төлөлт, урамшууллын оноо, захиалга цуцлах журам, цагийн хуваарь, холбоо барих, барааны тохиргоо болон асуудал шийдэх заавар. Эдгээр сэдвийн асуултад таамаглалгүйгээр заавал энэ tool-ийг ашигла.",
   inputSchema: z.object({
-    topic: z
-      .enum(["delivery", "return", "warranty", "payment", "cancellation", "hours", "all"])
-      .describe("Журмын сэдэв. Тодорхойгүй бол all"),
+    query: z
+      .string()
+      .describe("Хайх асуулт, монгол хэлээр бүтэн өгүүлбэрээр. Жишээ: чихэвчний нэг тал дуугарахгүй байна"),
   }),
-  execute: async ({ topic }) => {
-    const db = await getDb();
-    const { rows } =
-      topic === "all"
-        ? await db.execute("SELECT topic, title, content FROM policies")
-        : await db.execute({ sql: "SELECT topic, title, content FROM policies WHERE topic = ?", args: [topic] });
-    return { policies: rows.map((r) => ({ ...r })) };
+  execute: async ({ query }) => {
+    const hits = await searchKnowledgeBase(query, 4);
+    if (hits.length === 0) return { found: false, message: "Мэдлэгийн сангаас тохирох мэдээлэл олдсонгүй." };
+    return { found: true, results: hits };
   },
 });

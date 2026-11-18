@@ -6,18 +6,47 @@ type Usage = { input: number; output: number; total: number };
 
 type TraceEvent = {
   t: number;
-  ev: "start" | "step-start" | "tool-call" | "tool-result" | "text-start" | "step-finish" | "finish" | "error";
+  ev:
+    | "start"
+    | "step-start"
+    | "tool-call"
+    | "tool-result"
+    | "approval-request"
+    | "text-start"
+    | "step-finish"
+    | "finish"
+    | "error";
   toolName?: string;
   toolCallId?: string;
   failed?: boolean;
+  denied?: boolean;
   usage?: Usage | null;
   model?: string;
   text?: string;
 };
 
-type ToolSpan = { id: string; name: string; start: number; end?: number; failed?: boolean };
+type ToolSpan = {
+  id: string;
+  name: string;
+  start: number;
+  end?: number;
+  failed?: boolean;
+  /** Human-in-the-loop: хүний зөвшөөрөл хүлээсэн tool-ийн төлөв. */
+  approval?: "pending" | "approved" | "denied";
+};
 type Step = { n: number; start: number; end?: number; usage?: Usage; tools: ToolSpan[]; textAt?: number };
-type Run = { steps: Step[]; end?: number; ttft?: number; total?: Usage; model?: string; error?: string };
+type Run = {
+  steps: Step[];
+  end?: number;
+  ttft?: number;
+  total?: Usage;
+  model?: string;
+  error?: string;
+  /** Одоогийн хэсгийн (segment) эхлэх цэг. Зөвшөөрлийн дараа үргэлжилсэн хүсэлтийн цагийг өмнөхөд залгана. */
+  offset: number;
+  /** Хамгийн сүүлийн үйл явдлын цаг. */
+  lastT: number;
+};
 
 const TOOL_LABELS: Record<string, string> = {
   searchProducts: "Бараа хайх",
@@ -25,7 +54,7 @@ const TOOL_LABELS: Record<string, string> = {
   listCustomerOrders: "Хэрэглэгчийн захиалгууд",
   cancelOrder: "Захиалга цуцлах",
   createTicket: "Тасалбар үүсгэх",
-  getStorePolicy: "Журам харах",
+  searchKnowledge: "Мэдлэгийн сангаас хайх",
 };
 
 function traceOf(m: UIMessage): TraceEvent[] {
@@ -35,9 +64,17 @@ function traceOf(m: UIMessage): TraceEvent[] {
 }
 
 function buildRun(events: TraceEvent[]): Run {
-  const run: Run = { steps: [] };
+  const run: Run = { steps: [], offset: 0, lastT: 0 };
   let cur: Step | undefined;
-  for (const e of events) {
+  for (const raw of events) {
+    // Хүн зөвшөөрсний дараа агент шинэ хүсэлтээр үргэлжилдэг бөгөөд серверийн цаг 0-ээс дахин эхэлнэ.
+    // Тиймээс хоёр дахь "start"-аас хойших цагийг өмнөх хэсгийн төгсгөлд залгана (хүний бодсон хугацаа орохгүй).
+    if (raw.ev === "start" && run.lastT > 0) {
+      run.offset = run.lastT;
+      run.end = undefined;
+    }
+    const e = { ...raw, t: raw.t + run.offset };
+    run.lastT = Math.max(run.lastT, e.t);
     switch (e.ev) {
       case "step-start": {
         // "step-start" нь загварын хариу ирж эхлэх үед гардаг. Загварын бодсон хугацааг оруулахын тулд
@@ -56,7 +93,15 @@ function buildRun(events: TraceEvent[]): Run {
           if (tool) {
             tool.end = e.t;
             tool.failed = e.failed;
+            if (e.denied) tool.approval = "denied";
+            else if (tool.approval === "pending") tool.approval = "approved";
           }
+        }
+        break;
+      case "approval-request":
+        for (const s of run.steps) {
+          const tool = s.tools.find((x) => x.id === e.toolCallId);
+          if (tool) tool.approval = "pending";
         }
         break;
       case "text-start":
@@ -113,7 +158,9 @@ export function AgentPanel({
   const last = messages[messages.length - 1];
   // Хүсэлт илгээгээд хариу эхлээгүй үед өмнөх хариуг биш, хоосон шинэ ажиллагааг харуулна.
   const waiting = busy && last?.role === "user";
-  const run: Run | null = waiting ? { steps: [] } : (assistantRuns[assistantRuns.length - 1] ?? null);
+  const run: Run | null = waiting
+    ? { steps: [], offset: 0, lastT: 0 }
+    : (assistantRuns[assistantRuns.length - 1] ?? null);
   const live = busy && run !== null && run.end === undefined;
 
   // Загвар хариу өгч эхлээгүй (бодож байгаа) үед хүлээгдэж буй алхмыг түр харуулна.
@@ -123,6 +170,10 @@ export function AgentPanel({
       run.steps.push({ n: run.steps.length + 1, start: prev?.end ?? 0, tools: [] });
     }
   }
+  // Ажиллаж байх үеийн "одоо": хэсгийн эхлэл + хүсэлт илгээснээс хойших хугацаа.
+  const now = (run?.offset ?? 0) + liveMs;
+  const awaitingApproval =
+    !busy && run !== null && run.steps.some((s) => s.tools.some((t) => t.approval === "pending"));
 
   const session = assistantRuns.reduce(
     (acc, r) => {
@@ -142,11 +193,11 @@ export function AgentPanel({
     );
   }
 
-  const elapsed = run.end ?? (live ? liveMs : (run.steps[run.steps.length - 1]?.end ?? 0));
+  const elapsed = run.end ?? (live ? Math.max(now, run.lastT) : run.lastT);
   const scale = Math.max(elapsed, 1);
   const toolCount = run.steps.reduce((n, s) => n + s.tools.length, 0);
   const toolMs = run.steps.reduce(
-    (n, s) => n + s.tools.reduce((m, t) => m + ((t.end ?? (live ? liveMs : t.start)) - t.start), 0),
+    (n, s) => n + s.tools.reduce((m, t) => m + ((t.end ?? (live && !t.approval ? now : t.start)) - t.start), 0),
     0,
   );
 
@@ -159,12 +210,14 @@ export function AgentPanel({
             className={`rounded px-1.5 py-0.5 ${
               run.error
                 ? "bg-red-100 text-red-700"
-                : live
+                : awaitingApproval
+                  ? "bg-amber-100 text-amber-800"
+                  : live
                   ? "bg-blue-100 text-blue-800"
                   : "bg-emerald-100 text-emerald-800"
             }`}
           >
-            {run.error ? "алдаа" : live ? "ажиллаж байна…" : "дууссан"}
+            {run.error ? "алдаа" : awaitingApproval ? "хүний зөвшөөрөл хүлээж байна" : live ? "ажиллаж байна…" : "дууссан"}
           </span>
         </div>
         <div className="grid grid-cols-3 gap-2">
@@ -185,7 +238,7 @@ export function AgentPanel({
         {
           <div className="flex flex-col gap-1">
             {run.steps.map((s) => {
-              const sEnd = s.end ?? (live ? Math.max(liveMs, s.start) : s.start);
+              const sEnd = s.end ?? (live ? Math.max(now, s.start) : Math.max(run.lastT, s.start));
               return (
                 <div key={s.n} className="rounded-lg border border-zinc-200 p-2">
                   <Row
@@ -193,7 +246,7 @@ export function AgentPanel({
                     sub={
                       s.usage
                         ? `${fmtNum(s.usage.input)} → ${fmtNum(s.usage.output)} токен`
-                        : s.end === undefined
+                        : s.end === undefined && live
                           ? "бодож байна…"
                           : ""
                     }
@@ -204,18 +257,26 @@ export function AgentPanel({
                     running={s.end === undefined && live}
                   />
                   {s.tools.map((t) => {
-                    const tEnd = t.end ?? (live ? Math.max(liveMs, t.start) : t.start);
+                    const tEnd = t.end ?? (live && !t.approval ? Math.max(now, t.start) : t.start);
                     return (
                       <Row
                         key={t.id}
                         indent
                         label={TOOL_LABELS[t.name] ?? t.name}
-                        sub={t.name}
+                        sub={
+                          t.approval === "pending"
+                            ? "зөвшөөрөл хүлээж байна"
+                            : t.approval === "approved"
+                              ? "хүн зөвшөөрсөн"
+                              : t.approval === "denied"
+                                ? "хүн татгалзсан"
+                                : t.name
+                        }
                         start={t.start}
                         end={tEnd}
                         scale={scale}
-                        color={t.failed ? "bg-red-500" : "bg-emerald-500"}
-                        running={t.end === undefined && live}
+                        color={t.failed ? "bg-red-500" : t.approval ? "bg-amber-500" : "bg-emerald-500"}
+                        running={t.end === undefined && live && !t.approval}
                       />
                     );
                   })}
@@ -240,6 +301,7 @@ export function AgentPanel({
         <div className="mt-2 flex gap-3 text-zinc-500">
           <Legend color="bg-blue-500" text="LLM алхам" />
           <Legend color="bg-emerald-500" text="Tool" />
+          <Legend color="bg-amber-500" text="Зөвшөөрөл" />
           <Legend color="bg-violet-500" text="Хариу" />
         </div>
       </section>

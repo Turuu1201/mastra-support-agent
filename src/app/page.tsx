@@ -1,7 +1,7 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./agent-panel";
 
@@ -14,7 +14,7 @@ const TOOL_LABELS: Record<string, string> = {
   listCustomerOrders: "Хэрэглэгчийн захиалгууд",
   cancelOrder: "Захиалга цуцлах",
   createTicket: "Тасалбар үүсгэх",
-  getStorePolicy: "Журам харах",
+  searchKnowledge: "Мэдлэгийн сангаас хайх",
 };
 
 const EXAMPLES = [
@@ -24,6 +24,8 @@ const EXAMPLES = [
   "ORD-1004 захиалгаа цуцлмаар байна",
   "ORD-1001-ээр авсан чихэвч маань ажиллахгүй байна",
   "Орон нутагт хүргэлт хэд хоног болох вэ?",
+  "Buds Pro чихэвчний нэг тал дуугарахгүй байна, яах вэ?",
+  "Хуваан төлөлтөөр авах нөхцөл юу вэ?",
 ];
 
 const STATUS_STYLE: Record<string, string> = {
@@ -38,7 +40,84 @@ const money = (n: unknown) => Number(n).toLocaleString("en-US") + "₮";
 
 export default function Home() {
   const [threadId, setThreadId] = useState(() => crypto.randomUUID());
+  // Сайт нэвтрэх код шаарддаг эсэхийг серверээс асууна (ACCESS_CODE тохируулсан үед).
+  const [access, setAccess] = useState<"loading" | "locked" | "ok">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((a: { required: boolean; authorized: boolean }) => {
+        if (!cancelled) setAccess(a.required && !a.authorized ? "locked" : "ok");
+      })
+      .catch(() => {
+        if (!cancelled) setAccess("ok");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (access === "loading") return <div className="h-dvh bg-zinc-50" />;
+  if (access === "locked") return <AccessGate onUnlock={() => setAccess("ok")} />;
   return <Chat key={threadId} threadId={threadId} onNewChat={() => setThreadId(crypto.randomUUID())} />;
+}
+
+function AccessGate({ onUnlock }: { onUnlock: () => void }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  const submit = async () => {
+    if (!code.trim() || checking) return;
+    setChecking(true);
+    setError("");
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (res.ok) return onUnlock();
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      setError(body?.error ?? "Нэвтэрч чадсангүй.");
+    } catch {
+      setError("Сервертэй холбогдож чадсангүй.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="flex h-dvh items-center justify-center bg-zinc-50 px-4 text-zinc-900">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+        className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-6"
+      >
+        <h1 className="text-base font-semibold">ТехМаркет туслах</h1>
+        <p className="mt-1 text-sm text-zinc-500">Энэ туршилтын сайт нэвтрэх кодоор хамгаалагдсан.</p>
+        <input
+          type="password"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="Нэвтрэх код"
+          autoFocus
+          className="mt-4 w-full rounded-xl border border-zinc-300 px-4 py-2.5 text-sm outline-none focus:border-zinc-900"
+        />
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        <button
+          type="submit"
+          disabled={!code.trim() || checking}
+          className="mt-4 w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm text-white disabled:opacity-40"
+        >
+          {checking ? "Шалгаж байна…" : "Нэвтрэх"}
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void }) {
@@ -74,9 +153,11 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
     }
   }, []);
 
-  const { messages, sendMessage, status, error, stop } = useChat({
+  const { messages, sendMessage, status, error, stop, addToolApprovalResponse } = useChat({
     id: threadId,
     transport,
+    // Хүн зөвшөөрөх/татгалзах товч дарсны дараа хариуг сервер рүү автоматаар илгээж, агентыг үргэлжлүүлнэ.
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onFinish: () => void refreshData(),
   });
 
@@ -90,6 +171,12 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
   }, [messages, status]);
 
   const busy = status === "submitted" || status === "streaming";
+  // Сүүлийн хариунд зөвшөөрөл хүлээж буй tool байвал шинэ мессеж илгээхийг түр хаана.
+  const awaitingApproval =
+    !busy &&
+    (messages[messages.length - 1]?.parts ?? []).some(
+      (p) => (p as unknown as ToolPart).state === "approval-requested",
+    );
 
   // Ажиллаж байх үед цагийн шугамыг 100 мс тутамд шинэчилнэ.
   useEffect(() => {
@@ -101,7 +188,7 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
 
   const send = (text: string) => {
     const t = text.trim();
-    if (!t || busy) return;
+    if (!t || busy || awaitingApproval) return;
     void sendMessage({ text: t });
     setInput("");
   };
@@ -167,7 +254,19 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
                       );
                     }
                     if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
-                      return <ToolCall key={i} part={part as unknown as ToolPart} />;
+                      return (
+                        <ToolCall
+                          key={i}
+                          part={part as unknown as ToolPart}
+                          onApproval={(id, approved) =>
+                            void addToolApprovalResponse({
+                              id,
+                              approved,
+                              reason: approved ? undefined : "Хэрэглэгч цуцлахаас татгалзсан",
+                            })
+                          }
+                        />
+                      );
                     }
                     return null;
                   })}
@@ -196,8 +295,9 @@ function Chat({ threadId, onNewChat }: { threadId: string; onNewChat: () => void
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Асуултаа бичнэ үү…"
-              className="flex-1 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm outline-none focus:border-zinc-900"
+              placeholder={awaitingApproval ? "Эхлээд дээрх үйлдлийг зөвшөөрөх эсэхээ сонгоно уу" : "Асуултаа бичнэ үү…"}
+              disabled={awaitingApproval}
+              className="flex-1 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm outline-none focus:border-zinc-900 disabled:bg-zinc-100"
             />
             {busy ? (
               <button
@@ -315,19 +415,56 @@ type ToolPart = {
   input?: unknown;
   output?: unknown;
   errorText?: string;
+  /** Human-in-the-loop: зөвшөөрлийн хүсэлт ба түүний хариу. */
+  approval?: { id: string; approved?: boolean };
 };
 
-function ToolCall({ part }: { part: ToolPart }) {
+function ToolCall({ part, onApproval }: { part: ToolPart; onApproval: (id: string, approved: boolean) => void }) {
   const name = part.type === "dynamic-tool" ? (part.toolName ?? "tool") : part.type.slice(5);
   const done = part.state === "output-available";
   const failed = part.state === "output-error";
+  const denied = part.state === "output-denied";
+
+  // Агент зөвшөөрөл шаарддаг tool дуудсан: хүн шийдэх хүртэл tool ажиллахгүй.
+  if (part.state === "approval-requested" && part.approval) {
+    const approvalId = part.approval.id;
+    const input = (part.input ?? {}) as { orderId?: string; reason?: string };
+    return (
+      <div className="mb-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
+        <div className="font-medium text-amber-900">Зөвшөөрөл шаардлагатай: {TOOL_LABELS[name] ?? name}</div>
+        <p className="mt-1 text-amber-900/80">
+          {name === "cancelOrder" && input.orderId
+            ? `Агент ${input.orderId} захиалгыг цуцлах гэж байна. Цуцалсны дараа сэргээх боломжгүй.`
+            : "Агент энэ үйлдлийг хийхийн өмнө таны зөвшөөрлийг хүсэж байна."}
+        </p>
+        {input.reason && <p className="mt-1 text-xs text-amber-900/70">Шалтгаан: {input.reason}</p>}
+        <div className="mt-3 flex gap-2">
+          <button
+            onClick={() => onApproval(approvalId, true)}
+            className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm text-white hover:bg-zinc-700"
+          >
+            Зөвшөөрөх
+          </button>
+          <button
+            onClick={() => onApproval(approvalId, false)}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-100"
+          >
+            Татгалзах
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <details className="mb-2 rounded-xl border border-zinc-200 bg-zinc-100/70 text-xs">
       <summary className="flex cursor-pointer items-center gap-2 px-3 py-2">
-        <span>{failed ? "⚠️" : done ? "✅" : "⏳"}</span>
+        <span>{failed ? "⚠️" : denied ? "🚫" : done ? "✅" : "⏳"}</span>
         <span className="font-medium">{TOOL_LABELS[name] ?? name}</span>
         <span className="font-mono text-zinc-500">{name}</span>
-        {!done && !failed && <span className="text-zinc-400">ажиллаж байна…</span>}
+        {denied && <span className="text-zinc-500">хэрэглэгч татгалзсан</span>}
+        {done && part.approval?.approved && <span className="text-zinc-500">хэрэглэгч зөвшөөрсөн</span>}
+        {!done && !failed && !denied && <span className="text-zinc-400">ажиллаж байна…</span>}
       </summary>
       <div className="border-t border-zinc-200 px-3 py-2">
         <div className="mb-1 text-zinc-500">Оролт</div>

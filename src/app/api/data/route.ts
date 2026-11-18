@@ -1,9 +1,11 @@
 import { getDb, resetDb } from "@/lib/db";
+import { isAuthorized, unauthorized } from "@/lib/guard";
 
 export const dynamic = "force-dynamic";
 
 // Хажуугийн самбарт DB-ийн одоогийн төлөвийг харуулна.
-export async function GET() {
+export async function GET(req: Request) {
+  if (!isAuthorized(req)) return unauthorized();
   const db = await getDb();
   const [orders, tickets, products] = await Promise.all([
     db.execute(
@@ -21,7 +23,8 @@ export async function GET() {
 }
 
 // DB-г анхны жишээ өгөгдөл рүү буцаана.
-export async function POST() {
+export async function POST(req: Request) {
+  if (!isAuthorized(req)) return unauthorized();
   await resetDb();
   return Response.json({ ok: true });
 }

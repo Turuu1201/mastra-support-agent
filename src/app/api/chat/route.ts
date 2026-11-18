@@ -1,6 +1,7 @@
 import { handleChatStream } from "@mastra/ai-sdk";
 import { createUIMessageStreamResponse } from "ai";
 import { mastra, hasGeminiKey } from "@/mastra";
+import { chatRateLimit, isAuthorized, unauthorized } from "@/lib/guard";
 
 export const maxDuration = 60;
 
@@ -22,6 +23,9 @@ const toUsage = (u: Record<string, unknown> | undefined): Usage => {
 };
 
 export async function POST(req: Request) {
+  if (!isAuthorized(req)) return unauthorized();
+  const limited = chatRateLimit(req);
+  if (limited) return limited;
   if (!hasGeminiKey) {
     return Response.json(
       { error: "Gemini API түлхүүр алга. .env.local файлд GOOGLE_GENERATIVE_AI_API_KEY нэмээд серверээ дахин асаана уу." },
@@ -84,6 +88,15 @@ export async function POST(req: Request) {
           case "tool-output-error":
             controller.enqueue(chunk);
             trace({ ev: "tool-result", toolCallId: chunk.toolCallId, failed: chunk.type === "tool-output-error" });
+            return;
+          // Human-in-the-loop: tool зөвшөөрөл хүлээж зогссон / хүн татгалзсан.
+          case "tool-approval-request":
+            controller.enqueue(chunk);
+            trace({ ev: "approval-request", toolCallId: chunk.toolCallId });
+            return;
+          case "tool-output-denied":
+            controller.enqueue(chunk);
+            trace({ ev: "tool-result", toolCallId: chunk.toolCallId, denied: true });
             return;
           case "text-start":
             controller.enqueue(chunk);

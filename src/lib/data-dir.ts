@@ -5,6 +5,8 @@ import path from "node:path";
 // (түр зуурын — instance дахин асахад өгөгдөл анхны төлөвтөө орно).
 export function dbUrl(file: string): string {
   if (process.env.VERCEL) return `file:/tmp/${file}`;
-  fs.mkdirSync(path.join(process.cwd(), "data"), { recursive: true });
-  return `file:./data/${file}`;
+  // DATA_DIR-ээр өөр хавтас зааж болно (eval нь жинхэнэ өгөгдлийг хөндөхгүйн тулд тусдаа хавтас ашигладаг).
+  const dir = process.env.DATA_DIR || "data";
+  fs.mkdirSync(path.join(/*turbopackIgnore: true*/ process.cwd(), dir), { recursive: true });
+  return `file:./${dir}/${file}`;
 }

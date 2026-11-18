@@ -61,11 +61,6 @@ CREATE TABLE IF NOT EXISTS tickets (
   status TEXT NOT NULL DEFAULT 'open',
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS policies (
-  topic TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  content TEXT NOT NULL
-);
 `;
 
 async function init(db: Client) {
@@ -121,21 +116,12 @@ async function seed(db: Client) {
     ["ORD-1005", 2, 1, 3890000],
     ["ORD-1006", 10, 1, 145000], ["ORD-1006", 8, 1, 95000],
   ];
-  const policies: [string, string, string][] = [
-    ["delivery", "Хүргэлт", "Улаанбаатар хотод 24-48 цагт хүргэнэ, 100,000₮-өөс дээш захиалгад үнэгүй, бусад тохиолдолд 5,000₮. Орон нутагт унааны шуудангаар 3-5 хоногт хүргэнэ, төлбөр 15,000₮."],
-    ["return", "Буцаалт, солилт", "Бараа хүлээн авснаас хойш 7 хоногийн дотор, сав баглаа боодол бүрэн, ашиглаагүй тохиолдолд буцааж болно. Мөнгийг 3-5 ажлын өдөрт буцаан шилжүүлнэ. Үйлдвэрийн гэмтэлтэй барааг 14 хоногийн дотор шинээр сольж өгнө."],
-    ["warranty", "Баталгаат хугацаа", "Гар утас, зөөврийн компьютер 12 сар, ухаалаг цаг 6 сар, дагалдах хэрэгсэл 3 сарын баталгаатай. Унагасан, ус орсон гэмтэл баталгаанд хамаарахгүй."],
-    ["payment", "Төлбөр", "QPay, банкны карт, дансаар шилжүүлэг, бэлэн мөнгө хүлээн авна. 1,000,000₮-өөс дээш худалдан авалтад 6 хүртэл сар хүүгүй хувааж төлөх боломжтой."],
-    ["cancellation", "Захиалга цуцлах", "Зөвхөн 'pending' (хүлээгдэж буй) болон 'processing' (бэлтгэж буй) төлөвтэй захиалгыг цуцлах боломжтой. Хүргэлтэнд гарсан (shipped) захиалгыг цуцлахгүй, хүлээн авсны дараа буцаалтын журмаар шийднэ."],
-    ["hours", "Цагийн хуваарь, холбоо барих", "Даваа-Баасан 09:00-20:00, Бямба-Ням 10:00-18:00. Утас: 7700-0000. Хаяг: УБ, СБД, Энхтайваны өргөн чөлөө 15."],
-  ];
 
   const stmts = [
     ...customers.map((a) => ({ sql: "INSERT INTO customers (id,name,phone,email) VALUES (?,?,?,?)", args: a })),
     ...products.map((a) => ({ sql: "INSERT INTO products (id,name,category,price,stock,description) VALUES (?,?,?,?,?,?)", args: a })),
     ...orders.map((a) => ({ sql: "INSERT INTO orders (id,customer_id,status,total,delivery_address,created_at) VALUES (?,?,?,?,?,?)", args: a })),
     ...items.map((a) => ({ sql: "INSERT INTO order_items (order_id,product_id,quantity,unit_price) VALUES (?,?,?,?)", args: a })),
-    ...policies.map((a) => ({ sql: "INSERT INTO policies (topic,title,content) VALUES (?,?,?)", args: a })),
   ];
   await db.batch(stmts, "write");
 }
