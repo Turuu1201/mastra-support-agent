@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  cacheComponents: true,
-  partialPrefetching: true,
+  // Mastra болон native SQLite сангуудыг bundle хийхгүй, Node-оос шууд ачаална.
+  serverExternalPackages: ["@mastra/*", "@libsql/client", "libsql"],
   turbopack: {
     rules: {
       "*.css": {
